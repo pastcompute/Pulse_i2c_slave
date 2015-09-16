@@ -1,5 +1,3 @@
-//#include <TinyPinChange.h>
-
 #include <arduino.h>
 #include <usitwislave.h>
 #include <usitwislave_devices.h>
@@ -104,17 +102,8 @@ static void twi_callback(
   *output_buffer_length = len;
 }
 
-#if 0
-void on_pulse()
-{
-  pulse_counter ++;
-  digitalWrite (1, HIGH);
-}
-#endif
-
 volatile bool next_ir = true;
 
-#if 1
 ISR (PCINT0_vect)
 {
   // increment the counter
@@ -124,7 +113,6 @@ ISR (PCINT0_vect)
     next_ir = !next_ir;
   }
 }
-#endif
 
 volatile uint32_t idle_counter = 0;
 
@@ -140,18 +128,6 @@ void idler()
     i2c_rx = 0;
     idle_counter = 0;
     next_led = true;
-  } else if (flash_down <= 0) {
-#if 0
-    noInterrupts();
-    //cli();
-    uint32_t cache_counter = pulse_counter;
-    //sei();
-    interrupts();
-    if (prev_counter != cache_counter) {
-      prev_counter = cache_counter;
-      flash_down = 6;
-    }
-#endif 
   }
   if (flash_down > 0) {
     // Note: reprogramming at 8MHz doubles the flash interval here
@@ -181,7 +157,6 @@ void setup() {
     blink(); delay(200); blink(); delay(200); blink();
   }
 
-#if 1
 #if 0
 #ifdef INPUT_PULLUP
   pinMode(4, INPUT_PULLUP);
@@ -193,9 +168,6 @@ void setup() {
   _SFR_BYTE(GIMSK) |= _BV(PCIE);
   _SFR_BYTE(PCMSK) |= _BV(PCINT4);
   sei();
-#else
-  attachInterrupt(4, on_pulse, CHANGE);
-#endif
 
   // put your main code here, to run repeatedly:
   // usi_twi_slave(0x19, 1, (cbk_t)&twi_callback, NULL);
