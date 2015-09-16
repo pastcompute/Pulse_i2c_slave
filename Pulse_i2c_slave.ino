@@ -14,10 +14,6 @@
 
 typedef void (*cbk_t)(uint8_t, const uint8_t *, uint8_t *, uint8_t *);
 
-volatile uint8_t test_counter = 0;
-
-volatile uint32_t pulse_counter = 0;
-
 int get_temp() {
   analogReference(INTERNAL1V1);
   int raw = analogRead(A0+15); 
@@ -35,24 +31,16 @@ void blink() {
 }
 
 volatile bool next_led = false;
-
-volatile int got_msg = 0;
-
-volatile int cmd = -1;
-volatile int32_t idle_wrap = 100000; // 4 seconds
+volatile int i2c_rx = 0;
+volatile uint8_t scratch = 0;
+volatile uint16_t test_counter = 0;
+volatile uint32_t pulse_counter = 0;
+volatile uint32_t latch_pulse_counter = 0;
 
 static void twi_callback(
     volatile uint8_t input_buffer_length, volatile const uint8_t *input_buffer,
     volatile uint8_t *output_buffer_length, volatile uint8_t *output_buffer)
 {
-  output_buffer[0] = 0xc0;
-  output_buffer[1] = 0x01;
-  *output_buffer_length = 2;
-
-  got_msg ++;
-  cmd = input_buffer[0];
-  idle_wrap = idle_wrap / 2;
-  if (idle_wrap < 2000) { idle_wrap = 100000; }
 #if 0
   cli();
   next_led = !next_led;
@@ -61,89 +49,106 @@ static void twi_callback(
   digitalWrite(1, led_on?HIGH:LOW);
 #endif
 
-#if 0
-  // input_buffer_length == bytes from master
-  // output_buffer_length == result
+  i2c_rx ++;
   if (input_buffer_length < 1) { return; }
   
   const uint8_t cmd = input_buffer[0];
-  uint8_t len = 0;
 
-  if (cmd == 1) {
-    // echo
-    if (input_buffer_length > 1) {
-      output_buffer[0] = input_buffer[1];
-      len = 1;
-    }
-  } else
-  if (input_buffer[0] == 2) {
-    // counter
-    output_buffer[0] = ++ test_counter;
-    len = 1;
-  } else
-  if (input_buffer[0] == 3) {
-    // pulse counter
+  // To make this work properly with i2cget in openwrt , just work on bytes
+  // Thus
+  // Addr 1 == echo second byte - not sure how to make it work with i2cget/i2cset
+  // Addr 2 == roll count, incremented for each valid i2c command (including itself)
+  // Addr 3 == roll count MSB
+  // Addr 4 == pulse count LSB, latches value for xSB and MSB
+  // Addr 5 == pulse count xSB
+  // Addr 6 == pulse count MSB
+  // Addr 7 == chip temp degC
+  // Addr 8 == read scratch
+  // Addr 9 == write scratch
+
+  if (cmd > 0 && cmd < 9) { test_counter ++; }
+
+  // most of these seem to lag for some reason
+
+  uint8_t len = 1;
+  switch (cmd) {
+  case 1: output_buffer[0] = input_buffer[1]; break;
+  case 2: output_buffer[0] = test_counter & 0xff; break;
+  case 3: output_buffer[0] = (test_counter >> 8) & 0xff; break;
+  case 4:
     cli();
-    const uint32_t value = pulse_counter;
+    latch_pulse_counter = pulse_counter;
     pulse_counter = 0;
     sei();
-    // -mutex}
-    output_buffer[0] = value & 0xff;
-    output_buffer[1] = (value >> 8) & 0xff;
-    output_buffer[2] = (value >> 16) & 0xff;
-    len = 3;
-  } else
-  if (input_buffer[0] == 4) {
-    output_buffer[0] = get_temp();
-    len = 1;
-  } else
-  {}
+    output_buffer[0] = latch_pulse_counter & 0xff; break;
+  case 5:
+    output_buffer[0] = (latch_pulse_counter >> 8) & 0xff; break;
+  case 6: 
+    output_buffer[0] = (latch_pulse_counter >> 16) & 0xff; break;
+  case 7: 
+    output_buffer[0] = get_temp(); break;
+  case 8: 
+    output_buffer[0] = scratch; break;
+  case 9:
+    output_buffer[0] = scratch; scratch = input_buffer[1]; break;  // i2cset -y 0 0x19 0x09 0x42 b ; i2cget -y 0 0x19 0x08 b  -- the second call ignores the reg and returns the value
+  case 10:
+    output_buffer[0] = 0x5a;   // only first is gettable by i2cget. 
+    output_buffer[1] = 0xde;
+    output_buffer[2] = 0xad;
+    output_buffer[3] = 0xbe;
+    output_buffer[4] = 0xef;
+    len = 5;
+    break;
+  case 11:
+    output_buffer[0] = 0xc0;   // only first is gettable by i2cget
+    output_buffer[1] = 0x0l;
+    len = 2;
+    break;
+  }
   *output_buffer_length = len;
-#endif
 }
 
 ISR (PCINT1_vect)
 {
   // increment the counter
   pulse_counter ++;
-  next_led = !next_led;
-  digitalWrite(1, next_led ?  HIGH : LOW);
 }
 
 volatile uint32_t idle_counter = 0;
 
 volatile int flash_down = -1;
 
+volatile uint32_t prev_counter = 0;
+
 void idler()
 {
-#if 0
-  if (cmd > 0) {
-    flash_down = cmd;
-    cmd = -1;
+  if (i2c_rx > 0) {
+    // flash a few times each receipt
+    flash_down = 8;
+    i2c_rx = 0;
     idle_counter = 0;
+    next_led = true;
+  } else if (flash_down <= 0) {
+    cli();
+    uint32_t cache_counter = pulse_counter;
+    sei();
+    if (prev_counter != cache_counter) {
+      prev_counter = cache_counter;
+      flash_down = 4;
+    } 
   }
   if (flash_down > 0) {
-    bool toggle = idle_counter % 20000 == 0;
+    bool toggle = idle_counter % 2500 == 0; // this gives a short flash, 50000 about 4 seconds, when NOT using sleep.
+    idle_counter ++;
     if (toggle) {
-      next_led = !next_led;
       digitalWrite(1, next_led?HIGH:LOW);
+      next_led = !next_led;
       flash_down --;
-      if (flash_down == 0) { idle_counter = 0; }
+      if (flash_down == 0) {
+        digitalWrite(1, LOW);
+        flash_down = -1;      
+      }
     }
-    return;  
-  }
-  
-  if (got_msg % 2 == 1) {
-    digitalWrite(1, LOW);
-    return;
-  }
-#endif
-  
-  idle_counter ++;
-  bool toggle = idle_counter % idle_wrap == 0;
-  if (toggle) {
-    next_led = !next_led;
-    digitalWrite(1, next_led?HIGH:LOW);
   }
 }
 
@@ -153,7 +158,6 @@ void setup() {
   delay(1000);
   blink(); delay(200); blink();
 
-#if 0
   // setup interrupt on PB1 (phys pin 6) going low
 #ifdef INPUT_PULLUP
   pinMode(2, INPUT_PULLUP);
@@ -161,6 +165,7 @@ void setup() {
   pinMode(2, INPUT);
   digitalWrite (2, LOW); // Digispark has no INPUT_PULLUP flag, we have to do it this way instead
 #endif
+#if 0
   cli();
   GIMSK = (1 << PCIE);
   PCMSK = (1 << PCINT1);
@@ -168,10 +173,11 @@ void setup() {
 #endif
 
   // put your main code here, to run repeatedly:
- // usi_twi_slave(0x19, 1, (cbk_t)&twi_callback, NULL);
- usi_twi_slave(0x19, 0, (cbk_t)&twi_callback, &idler);
+  // usi_twi_slave(0x19, 1, (cbk_t)&twi_callback, NULL);
+  usi_twi_slave(0x19, 0, (cbk_t)&twi_callback, &idler);
 }
 
 void loop() {
+  // never called
   blink(); delay(3000);
 }
