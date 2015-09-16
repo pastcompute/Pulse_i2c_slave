@@ -1,3 +1,5 @@
+//#include <TinyPinChange.h>
+
 #include <arduino.h>
 #include <usitwislave.h>
 #include <usitwislave_devices.h>
@@ -8,8 +10,8 @@
 // pin 5 == PB0 == i2c SDA == AREF
 // pin 2 == PB3 == AIN3 == crystal, pin 3 == AIN2 == PB4 == crystal
 // pin 4 = GND pin 8 = VCC
-// pin 1 == RST
-// pin 6 == PB1 == PWM == PCINT1
+// pin 1 == PB5 == RST
+// pin 6 == PB1 == PWM == PCINT1 == LED(!)
 // pin 8 == vcc
 
 typedef void (*cbk_t)(uint8_t, const uint8_t *, uint8_t *, uint8_t *);
@@ -41,14 +43,6 @@ static void twi_callback(
     volatile uint8_t input_buffer_length, volatile const uint8_t *input_buffer,
     volatile uint8_t *output_buffer_length, volatile uint8_t *output_buffer)
 {
-#if 0
-  cli();
-  next_led = !next_led;
-  bool led_on = next_led;
-  sei();
-  digitalWrite(1, led_on?HIGH:LOW);
-#endif
-
   i2c_rx ++;
   if (input_buffer_length < 1) { return; }
   
@@ -76,10 +70,12 @@ static void twi_callback(
   case 2: output_buffer[0] = test_counter & 0xff; break;
   case 3: output_buffer[0] = (test_counter >> 8) & 0xff; break;
   case 4:
+    //noInterrupts();
     cli();
     latch_pulse_counter = pulse_counter;
     pulse_counter = 0;
     sei();
+    //interrupts();
     output_buffer[0] = latch_pulse_counter & 0xff; break;
   case 5:
     output_buffer[0] = (latch_pulse_counter >> 8) & 0xff; break;
@@ -108,11 +104,27 @@ static void twi_callback(
   *output_buffer_length = len;
 }
 
-ISR (PCINT1_vect)
+#if 0
+void on_pulse()
+{
+  pulse_counter ++;
+  digitalWrite (1, HIGH);
+}
+#endif
+
+volatile bool next_ir = true;
+
+#if 1
+ISR (PCINT0_vect)
 {
   // increment the counter
-  pulse_counter ++;
+  if (digitalRead(4) == 1) {
+    pulse_counter ++;
+    digitalWrite (1, next_ir ? HIGH : LOW);
+    next_ir = !next_ir;
+  }
 }
+#endif
 
 volatile uint32_t idle_counter = 0;
 
@@ -129,15 +141,20 @@ void idler()
     idle_counter = 0;
     next_led = true;
   } else if (flash_down <= 0) {
-    cli();
+#if 0
+    noInterrupts();
+    //cli();
     uint32_t cache_counter = pulse_counter;
-    sei();
+    //sei();
+    interrupts();
     if (prev_counter != cache_counter) {
       prev_counter = cache_counter;
-      flash_down = 4;
-    } 
+      flash_down = 6;
+    }
+#endif 
   }
   if (flash_down > 0) {
+    // Note: reprogramming at 8MHz doubles the flash interval here
     bool toggle = idle_counter % 2500 == 0; // this gives a short flash, 50000 about 4 seconds, when NOT using sleep.
     idle_counter ++;
     if (toggle) {
@@ -154,28 +171,38 @@ void idler()
 
 void setup() {
   pinMode(1, OUTPUT);
-  blink(); delay(200); blink();
-  delay(1000);
-  blink(); delay(200); blink();
+  blink(); delay(400); blink(); delay(400); blink();
 
-  // setup interrupt on PB1 (phys pin 6) going low
-#ifdef INPUT_PULLUP
-  pinMode(2, INPUT_PULLUP);
-#else
-  pinMode(2, INPUT);
-  digitalWrite (2, LOW); // Digispark has no INPUT_PULLUP flag, we have to do it this way instead
-#endif
+  // setup interrupt on PB4 (phys pin 3) going high
+  // PB4 has Zener diode to earth pulling it low otherwise
+  pinMode(4, INPUT);
+
+  if (digitalRead(4)) {
+    blink(); delay(200); blink(); delay(200); blink();
+  }
+
+#if 1
 #if 0
+#ifdef INPUT_PULLUP
+  pinMode(4, INPUT_PULLUP);
+#else
+  digitalWrite (4, HIGH); // Digispark has no INPUT_PULLUP flag, we have to do it this way instead
+#endif
+#endif
   cli();
-  GIMSK = (1 << PCIE);
-  PCMSK = (1 << PCINT1);
+  _SFR_BYTE(GIMSK) |= _BV(PCIE);
+  _SFR_BYTE(PCMSK) |= _BV(PCINT4);
   sei();
+#else
+  attachInterrupt(4, on_pulse, CHANGE);
 #endif
 
   // put your main code here, to run repeatedly:
   // usi_twi_slave(0x19, 1, (cbk_t)&twi_callback, NULL);
   usi_twi_slave(0x19, 0, (cbk_t)&twi_callback, &idler);
 }
+
+// Program with No-USB - 8MHz (or 1MHz later)
 
 void loop() {
   // never called
